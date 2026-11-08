@@ -1,0 +1,42 @@
+{
+  "name": "pi-claude-bridge-remote",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run Claude Code for pi-claude-bridge on another machine: the daemon for the machine with the Claude login, and the client the bridge connects with.",
+  "keywords": [
+    "pi",
+    "claude-code",
+    "claude-agent-sdk",
+    "websocket"
+  ],
+  "author": "Haowei Wen <yushijinhun@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/yushijinhun/pi-claude-bridge/tree/feat/remote-mode/remote",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yushijinhun/pi-claude-bridge.git",
+    "directory": "remote"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "bin": {
+    "claude-remote-daemon": "daemon.mjs"
+  },
+  "exports": {
+    "./spawner": "./spawner.mjs",
+    "./protocol": "./protocol.mjs"
+  },
+  "files": [
+    "daemon.mjs",
+    "spawner.mjs",
+    "protocol.mjs",
+    "env-block.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "ws": "^8.22.1"
+  }
+}

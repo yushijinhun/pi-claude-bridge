@@ -32,10 +32,14 @@
     "typecheck": "tsc --noEmit"
   },
   "type": "module",
+  "workspaces": [
+    "remote"
+  ],
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.321",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "cc-session-io": "^0.4.1"
+    "cc-session-io": "^0.4.1",
+    "pi-claude-bridge-remote": "^0.1.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=1.5.1",

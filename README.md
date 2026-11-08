@@ -71,6 +71,7 @@ Create `~/.pi/agent/claude-bridge.json`
 - `forceTwoHundredK` - array of model ids to pin to 200K context (bare id, no `[1m]` suffix). Use if pi-ai declares a model at 1M but Claude Code won't serve it on your plan.
 - `plan` - set to `"max"` on a Max (or Team Premium/Enterprise) plan to run Opus 4.6 with 1M context (default `"pro"`).
 - `longContextExtraUsage` - set to `true` to run Opus 4.6 (on Pro) and Sonnet 4.6 with 1M context, billed through Extra Usage.
+- `remote` (experimental) - run Claude Code on another machine, the one with your Claude login, through its `claude-remote-daemon`: `{ "url": "ws://127.0.0.1:7878", "tokenFile": "~/.config/claude-remote-token" }`. Tools, files and session history stay on this machine. It needs the bridge from this repository rather than the npm release; setup is in [remote/README.md](remote/README.md). Claude Code then uses that machine's environment, so `autoMemoryEnabled`, `strictMcpConfig: false`, `pathToClaudeCodeExecutable` and the `env` below are ignored; pi shows a warning for the settings.
 
 ### Model overrides
 
@@ -84,7 +85,7 @@ Claude Code inherits pi's environment. To set variables only for bridge requests
 - An empty value removes the variable.
 - Extensions calling a bridge model can pass `env` per request the same way.
 
-`CLAUDE_CONFIG_DIR`, `HOME` and `USERPROFILE` can't be set there (the turn fails), since the bridge reads Claude Code's session files through pi's own values.
+`CLAUDE_CONFIG_DIR`, `HOME` and `USERPROFILE` can't be set there (the turn fails), since the bridge reads Claude Code's session files through pi's own values. With `provider.remote`, none of this reaches Claude Code: set its variables in the daemon's environment on the other machine.
 
 This example sends bridge requests through a proxy and keeps an exported gateway (issue #107) away from Claude Code, so it uses your Claude login:
 

@@ -37,6 +37,8 @@ No build step — the package ships `src` TypeScript as-is (see `files` in `pack
 
 The AskClaude package in `askclaude/` is versioned and published on its own: bump `askclaude/package.json` and run `npm publish` from `askclaude/`.
 
+The remote package in `remote/` (`pi-claude-bridge-remote`, an npm workspace) is not published, and is marked private. The bridge gets it through the workspace link that `npm install` makes in a checkout, which pi also runs for a git install; the machine that runs Claude Code starts `remote/daemon.mjs` in a checkout, after `npm install --omit=dev --workspace remote` installs its one dependency. A bridge published to npm could not install it.
+
 ## Tests
 
 Smoke tests typically need to run outside a sandbox because they access local pi/Claude settings and auth state.

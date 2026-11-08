@@ -60,7 +60,8 @@ function fakeQuery({ options, prompt }) {
 		const value = { ...builder.records[0], ...(uuid ? { uuid } : {}), parentUuid: parent };
 		parent = value.uuid;
 		mkdirSync(dirname(path), { recursive: true });
-		appendFileSync(deferred ? pending : path, JSON.stringify(value) + "\n");
+		// A remote run that loses its connection never brings its records back here.
+		if (!script.lost) appendFileSync(deferred ? pending : path, JSON.stringify(value) + "\n");
 		return value;
 	};
 	const childCode = `const fs=require('fs'),crypto=require('crypto'); process.on('SIGTERM',()=>{if(${Boolean(script.hang)})return;setTimeout(()=>{const q=${JSON.stringify(pending)};if(fs.existsSync(q)){fs.appendFileSync(${JSON.stringify(path)},fs.readFileSync(q));fs.unlinkSync(q);}if(${Boolean(script.late)}){const p=${JSON.stringify(path)};const r=fs.readFileSync(p,'utf8').trim().split('\\n').map(JSON.parse).filter(r=>r.uuid).at(-1);fs.appendFileSync(p,JSON.stringify({type:'attachment',uuid:crypto.randomUUID(),parentUuid:r.uuid,sessionId:${JSON.stringify(id)},attachment:{type:'interrupted',text:'late-exit-marker'}})+'\\n');}process.exit(0)},${script.late ? 60 : 0})});process.stdout.write('READY\\n');setInterval(()=>{},1000);`;
@@ -94,6 +95,8 @@ function fakeQuery({ options, prompt }) {
 			const value = record("assistant", [{ type: "text", text: "answer" }]);
 			yield { type: "assistant", parent_tool_use_id: null, uuid: value.uuid, message: { id: `answer-${id}`, model: model.id, content: value.message.content } };
 		}
+		// How the SDK reports the remote process's failure (remote/spawner.mjs).
+		if (script.lost) throw new Error("Failed to spawn Claude Code process: the connection to the remote daemon closed before Claude Code exited (1006)");
 		yield { type: "result", subtype: "success", is_error: Boolean(script.error), result: script.error ?? "answer", session_id: id };
 	})();
 	gen.interrupt = async () => {};
@@ -493,6 +496,33 @@ it("a prompt CC pulled but never replayed stays a gap, so a boot abort persists 
 	const state = __test.getSharedSession("pi");
 	const records = readFileSync(getSessionPath(state.ccSessionId, state.cwd, root), "utf8");
 	for (const uuid of state.uuids) if (uuid) assert.match(records, new RegExp(uuid));
+});
+
+it("a failed run whose records never reached the file leaves the next turn to cut before them", async () => {
+	const ask = user("warm");
+	scripts.push({});
+	const answer = await call([ask]).result();
+	await calls[0].exited;
+	const lost = user("lost prompt");
+	scripts.push({ lost: true });
+	const failed = await call([ask, answer, lost]).result();
+	assert.equal(failed.stopReason, "error");
+	assert.match(failed.errorMessage, /\(1006\)/);
+	await calls[1].exited;
+	await tick();
+	const stale = persisted();
+	const file = readFileSync(calls[1].path, "utf8");
+	assert.ok(stale.uuids.some((uuid) => uuid && !file.includes(uuid)), "the pointer names records the file lacks");
+	scripts.push({});
+	const next = await call([ask, answer, lost, failed, user("again")]).result();
+	assert.equal(next.stopReason, "stop", next.errorMessage);
+	assert.equal(calls[2].options.forkSession, undefined);
+	assert.notEqual(calls[2].options.resume, stale.ccSessionId, "a prefix-write into a new file");
+	const state = __test.getSharedSession("pi");
+	assert.deepEqual(state.uuids.slice(0, 2), stale.uuids.slice(0, 2), "the records before the lost ones are kept");
+	const written = readFileSync(calls[2].path, "utf8");
+	assert.match(written, /lost prompt/, "pi's copy of the lost prompt is written");
+	for (const uuid of state.uuids) if (uuid) assert.match(written, new RegExp(uuid));
 });
 
 it("an abort cancels a fresh query's wait on a stopping writer", { timeout: 5000 }, async () => {
