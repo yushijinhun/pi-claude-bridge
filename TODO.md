@@ -52,6 +52,8 @@ Beyond the session-sync ones in Ideas #1. Ordered by value; each is independent 
     - Fold `longContextExtraUsage` into it. On: 1M for Opus 4.6 on Pro and Sonnet 4.6, no blocking. Off: those stay at 200K and billed turns fail. If the config still has `longContextExtraUsage`, stop at startup with a "renamed" error so nobody drops to 200K unnoticed. `extraUsageByChoice` (`src/models.ts`) and the warning become this check.
     - Probe first: how a `longContextExtraUsage` 1M request and a Fable request on Pro with Extra Usage report (probably `overageInUse`, unmeasured), and whether aborting on the event stops output billing.
 
+16. **Remember one Claude Code session per branch.** The bridge keeps one CC session per pi session (`SessionState.ccSessionId`, `src/session-sync.ts:15`) and compares pi's history only with it (`syncSharedSession`). A `/tree` jump back to a branch that already ran is handled from the latest session: a fork (row 6) or a prefix-write (row 7) that imports the branch's messages from pi, so the prompt cache misses from the split point even though that branch's own CC session still exists. Keeping several recordings per pi session and picking the longest matching one would resume it instead. In remote mode it would also save a full transcript upload. The old files then have a use, which changes "Superseded session files pile up" (Deferred).
+
 ## Open questions
 
 - **Never-answered tool calls** (`[no tool result recorded]` as the only stub of a single-`tool_use` turn). 389 historical hits are the fixed parallel-results bug, but one real one appeared after the audit baseline (js13k project, 2026-08-31), so the cause isn't gone. Re-run `diag/audit-transcripts.mjs --since <last good date>` to check for more.

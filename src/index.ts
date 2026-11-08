@@ -8,8 +8,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync } from "fs";
 import { dirname } from "path";
 import { PROVIDER_ID, messageContentToText } from "./convert.js";
-import { QueryProcess } from "./query-process.js";
-import { readTranscript, recordedToolResults, resolveRecordingCut, savePrefixSession } from "./session-transcript.js";
+import { QueryProcess, type SpawnImpl } from "./query-process.js";
+import { capRemoteResult } from "./remote-results.js";
+import { createRemoteSpawner } from "pi-claude-bridge-remote/spawner";
+import { cutCountInFile, readTranscript, recordedToolResults, resolveRecordingCut, savePrefixSession } from "./session-transcript.js";
 import { debugLogPath, diagLogPath } from "./log-paths.js";
 import { applyLongContext, buildModels, claudeCodeModelId, extraUsageByChoice, type LongContextSettings } from "./models.js";
 import { MCP_SERVER_NAME, MCP_TOOL_PREFIX } from "./skills.js";
@@ -20,7 +22,7 @@ import { compareHistory, copyRecording, importHistory, LiveRecording, type Recor
 import { deleteSessionState, loadSessionState, saveSessionState } from "./session-store.js";
 import { newAssistantOutput, QueryContext, type AssistantStep } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { claudeCodeSettings, globalConfigPath, loadConfig, type Config } from "./config.js";
+import { claudeCodeSettings, globalConfigPath, loadConfig, remoteProviderSettings, remoteSettings, type Config } from "./config.js";
 import {
 	projectPromptCapture,
 	sharedPromptCaptures,
@@ -58,6 +60,8 @@ const ACTIVE_STREAM_SIMPLE_KEY = Symbol.for("claude-bridge:activeStreamSimple");
 const MODELS = buildModels(getModels("anthropic"));
 let providerSettings: NonNullable<Config["provider"]> = {};
 let longContextSettings: LongContextSettings = { plan: "pro", longContextExtraUsage: false };
+/** Set when Claude Code runs on another machine (provider.remote); every query spawns through it. */
+let remoteSpawner: SpawnImpl | undefined;
 
 // --- Session persistence ---
 
@@ -423,6 +427,7 @@ async function runIsolatedSummary(
 				...(effort ? { effort } : {}),
 				...(thinking ? { thinking } : {}),
 				...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
+				...(remoteSpawner ? { spawnClaudeCodeProcess: remoteSpawner, verbatimPrompts: true } : {}),
 				...makeCliDebugOptions("compact-summary"),
 			},
 		});
@@ -601,20 +606,29 @@ function syncSharedSession(
 	const cwdChanged = Boolean(state && safeRealpath(state.cwd) !== safeRealpath(cwd));
 	const promptChanged = Boolean(state && state.promptDigest !== promptDigest);
 	if (promptChanged) debug(`sync: system prompt append changed; importing pi history ${sessionTag(piSessionId)}`);
-	const row = piSessionId == null ? 0 : !state ? (priors.length ? 2 : 1) : state.model !== modelId || promptChanged ? 3
+	let row = piSessionId == null ? 0 : !state ? (priors.length ? 2 : 1) : state.model !== modelId || promptChanged ? 3
 		: cwdChanged ? 5
 		: compared.equal && !state.dirtyTail ? 4 : !compared.cutCount ? 5 : compared.cutCount === priors.length ? 6 : 7;
+	// Every row but reuse reads the file it cuts or replaces.
+	const transcript = state && row !== 4 ? readTranscript(state) : [];
+	// A cut keeps the records its slots name, so it stops before the first one the
+	// file lacks; with no cut left, pi's history is imported whole.
+	const kept = row === 6 || row === 7 ? cutCountInFile(transcript, state!, compared.cutCount) : { count: compared.cutCount, missing: null };
+	if (kept.missing) {
+		row = kept.count ? 7 : 5;
+		debug(`sync: ${state!.ccSessionId} lacks recorded ${kept.missing}; cutting at ${kept.count} of ${compared.cutCount} ${sessionTag(piSessionId)}`);
+	}
 	const reason = piSessionId == null ? "unattributed-history" : missingFile ? "missing-transcript" : !state ? "no-state"
 		: state.model !== modelId ? "model-changed" : promptChanged ? "prompt-changed" : cwdChanged ? "cwd-changed"
 		: row === 4 ? "equal-digests" : state.dirtyTail && compared.equal ? "dirty-tail" : "history-difference";
 	const decision = (path: string, after: string) => {
 		traceStrict("decision", {
 			callId: traceCallId, piSessionId: piSessionId ?? null, row, path, reason,
-			commonPrefix: compared.commonPrefix, cutCount: compared.cutCount,
+			commonPrefix: compared.commonPrefix, cutCount: kept.count, missingRecord: kept.missing,
 			ccSessionBefore: before?.ccSessionId ?? null, ccSessionAfter: after, priors: priors.length,
 			dirtyTail: Boolean(state?.dirtyTail), missingFile, cwdChanged, cwd, mirrorCwd: before?.cwd ?? null,
 		});
-		debug(`syncResult: path=${path} sessionId=${after} from=${before?.ccSessionId ?? "none"} priors=${priors.length} commonPrefix=${compared.commonPrefix} cutCount=${compared.cutCount} row=${row} ${sessionTag(piSessionId)}`);
+		debug(`syncResult: path=${path} sessionId=${after} from=${before?.ccSessionId ?? "none"} priors=${priors.length} commonPrefix=${compared.commonPrefix} cutCount=${kept.count} row=${row} ${sessionTag(piSessionId)}`);
 	};
 	if (row === 4) {
 		decision("reuse", state!.ccSessionId);
@@ -626,14 +640,13 @@ function syncSharedSession(
 	let recorded: Recording;
 	let records = 0;
 	if (row === 6 || row === 7) {
-		const transcript = readTranscript(state!);
-		const cut = resolveRecordingCut(transcript, state!, compared.cutCount);
-		recorded = prefixRecording(state!, compared.cutCount);
+		const cut = resolveRecordingCut(transcript, state!, kept.count);
+		recorded = prefixRecording(state!, kept.count);
 		if (row === 6) {
 			decision("fork", targetSessionId);
 			return { sessionId: state!.ccSessionId, targetSessionId, created: true, forkAt: cut.uuid, recorded, state };
 		}
-		const rest = priors.slice(compared.cutCount);
+		const rest = priors.slice(kept.count);
 		const replaced = transcript.slice(cut.index + 1);
 		const suffix = importHistory(session, rest, customToolNameToSdk, collectCarriedAttachments(replaced), recordedToolResults(replaced, state!.digests, rest));
 		recorded = { digests: [...recorded.digests, ...suffix.digests], uuids: [...recorded.uuids, ...suffix.uuids], cuttable: [...recorded.cuttable, ...suffix.cuttable] };
@@ -641,7 +654,6 @@ function syncSharedSession(
 	} else {
 		// Nothing is kept, but the old transcript's @file expansions and tool results
 		// still belong to messages pi kept unchanged.
-		const transcript = state ? readTranscript(state) : [];
 		recorded = importHistory(session, priors, customToolNameToSdk, collectCarriedAttachments(transcript), recordedToolResults(transcript, state?.digests ?? [], priors));
 		session.save();
 		records = session.records.length;
@@ -787,6 +799,8 @@ const activeQueryContexts = new Set<QueryContext>();
 // Whoever had the old askClaude setting on lost the tool on upgrade. Warned at most once
 // per module instance, which pi's per-session reruns of the factory below share.
 let askClaudeWarningShown = false;
+// Settings that remote mode ignores (remoteProviderSettings), warned the same way.
+let remoteWarningShown = false;
 
 // Captures of what pi assembled per agent; see src/prompt-capture.ts for why this
 // is keyed rather than held in a single slot. One process-wide instance, shared
@@ -1662,7 +1676,8 @@ async function deliverToolResults(
 	}
 
 	debug(`provider: tool results, ${results.length} results, ${c.pendingToolCalls.size} waiting handlers, ctx.msgs=${contextLength}`);
-	for (const result of results) {
+	for (const piResult of results) {
+		const result = remoteSpawner ? capRemoteResult(piResult) : piResult;
 		const id = result.toolCallId;
 		if (id && c.pendingToolCalls.has(id)) {
 			const pending = c.pendingToolCalls.get(id)!;
@@ -2041,7 +2056,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			signal: traceSignalId(options?.signal), digests: { systemPromptAppend },
 		}, ccChildEnv(options?.env));
 		const cliDebug = makeCliDebugOptions("provider");
-		const childProcess = new QueryProcess(cliDebug.stderr);
+		const childProcess = new QueryProcess(cliDebug.stderr, remoteSpawner);
 		const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 			cwd,
 			env: childEnv,
@@ -2086,6 +2101,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 			...(claudeExecutable ? { pathToClaudeCodeExecutable: claudeExecutable } : {}),
 			...cliDebug,
 			spawnClaudeCodeProcess: childProcess.spawn,
+			// Remotely, an `@path` would expand from the other machine's files.
+			...(remoteSpawner ? { verbatimPrompts: true } : {}),
 		};
 
 		debug("provider: fresh query",
@@ -2275,8 +2292,24 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 export default function (pi: ExtensionAPI) {
 	const config = loadConfig();
 	debug(`bridge: version=${BRIDGE_VERSION} sdk=${packageVersion("@anthropic-ai/claude-agent-sdk")} pi=${PI_VERSION}`);
-	debug("loadConfig:", JSON.stringify(config));
+	// Users attach this log to issues; an inline provider.remote.token stays out of it.
+	debug("loadConfig:", JSON.stringify(config, (key, value) => (key === "token" && typeof value === "string" ? "(redacted)" : value)));
 	providerSettings = config.provider ?? {};
+	const remote = remoteSettings(providerSettings);
+	let remoteIgnored: string[] = [];
+	// pi reruns this factory per session in the same module; follow the config each time.
+	remoteSpawner = undefined;
+	if (remote) {
+		({ provider: providerSettings, ignored: remoteIgnored } = remoteProviderSettings(providerSettings));
+		remoteSpawner = createRemoteSpawner({
+			...remote,
+			onLeak: (leaks: unknown[]) => {
+				debug(`remote: Claude Code wrote ${leaks.length} record(s) describing the remote machine`, JSON.stringify(leaks).slice(0, 2000));
+				piUI?.notify("Claude bridge: the remote Claude Code described its own machine to the model; see the bridge log", "warning");
+			},
+		});
+		debug(`remote: Claude Code runs through ${remote.url}${remoteIgnored.length ? `; ignoring ${remoteIgnored.join(", ")}` : ""}`);
+	}
 	// Opus 4.6 and Sonnet 4.6 need these settings to know if they're eligible for 1M context
 	// Validate at the boundary: a non-array here would throw inside every
 	// claudeCodeModelId call and brick the extension at activation.
@@ -2323,6 +2356,10 @@ export default function (pi: ExtensionAPI) {
 			if (!pi.getAllTools?.().some((tool) => tool.name === "AskClaude")) {
 				ctx.ui?.notify?.(`claude-bridge: AskClaude is now a separate package. Install it with \`pi install npm:pi-claude-bridge-askclaude\`, or remove "askClaude" from ${globalConfigPath()}.`, "warning");
 			}
+		}
+		if (remoteIgnored.length && !remoteWarningShown) {
+			remoteWarningShown = true;
+			ctx.ui?.notify?.(`claude-bridge: Claude Code runs on another machine (provider.remote), so these settings are ignored: ${remoteIgnored.join(", ")}. Remove them from ${globalConfigPath()}.`, "warning");
 		}
 	});
 	pi.on("session_before_compact", (event, ctx) => {

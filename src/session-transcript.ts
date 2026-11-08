@@ -63,6 +63,19 @@ export function resolveCut(records: readonly RecordEntry[], uuid: string | null)
 	return { uuid: resolved, index: end };
 }
 
+/** The most slots, up to `count`, that a cut can keep from this file: it ends
+ * at a cuttable slot before the first slot whose record the file lacks
+ * (`missing`). A failed run can leave its recording naming records that never
+ * reached the file: a remote run whose file never came back, or a child killed
+ * before its append. */
+export function cutCountInFile(records: readonly RecordEntry[], recorded: Recording, count: number): { count: number; missing: string | null } {
+	const first = recorded.uuids.slice(0, count).findIndex((uuid) => uuid !== null && findBoundary(records, uuid) < 0);
+	if (first < 0) return { count, missing: null };
+	let kept = first;
+	while (kept && !recorded.cuttable[kept - 1]) kept--;
+	return { count: kept, missing: recorded.uuids[first] };
+}
+
 /** Live result/replay order can differ from disk order. Retain all anchors
  * of the logical prefix, not just the last slot's own UUID. */
 export function resolveRecordingCut(records: readonly RecordEntry[], recorded: Recording, count: number): { uuid: string; index: number } {
