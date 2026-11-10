@@ -28,7 +28,7 @@ trap cleanup EXIT
 
 mkdir -p "$WORK/b" "$WORK/sessions"
 # B installs the package: its files and its one dependency.
-cp "$REPO"/remote/{daemon,protocol,env-block}.mjs "$REPO"/remote/package.json "$WORK/b/"
+cp "$REPO"/remote/{daemon,protocol,env-block,accounts,pooled-process}.mjs "$REPO"/remote/package.json "$WORK/b/"
 mkdir -p "$WORK/b/node_modules" && cp -r "$REPO/node_modules/ws" "$WORK/b/node_modules/"
 # A binary inside the checkout's node_modules is hidden on B too.
 case "$CLAUDE_BIN" in "$(dirname "$REPO")"/*) cp "$CLAUDE_BIN" "$WORK/b/claude"; CLAUDE_BIN="$WORK/b/claude" ;; esac

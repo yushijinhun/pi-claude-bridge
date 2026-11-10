@@ -37,13 +37,16 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { WebSocketServer } from "ws";
 import { BEHIND_LIMIT_MS, CHANNEL, channelMessage, claudeArgs, claudeCodeEnv, json, keepAlive, MAX_MESSAGE_BYTES, MODEL, projectDirName, parseJsonl, REQUEST_KEYS, sendChannel, sending, SHA256, sha256, SUBPROTOCOL, THINKING, toJsonl, UUID } from "./protocol.mjs";
 import { environmentRecord, localSnapshot, TESTED_CLAUDE_VERSIONS } from "./env-block.mjs";
+import { AccountPool } from "./accounts.mjs";
+import { PooledProcess } from "./pooled-process.mjs";
 
 const USAGE = `usage: claude-remote-daemon --token-file FILE [--listen 127.0.0.1:7878 | --listen unix:/path/to/socket] [--path /]
-    [--max-runs 8] [--keepalive-seconds 20] [--claude PATH] [--spawn-cwd DIR] [--tmp-dir DIR] [--agent-sdk-version 0.3.308] [--keep-days 30]`;
+    [--max-runs 8] [--keepalive-seconds 20] [--claude PATH] [--spawn-cwd DIR] [--tmp-dir DIR] [--agent-sdk-version 0.3.308] [--keep-days 30]
+    [--accounts-file FILE]`;
 const fatal = (message) => { console.error(`claude-remote: ${message}`); process.exit(2); };
 // A typo or a removed option (--token, --tls-cert) stops the daemon instead of
 // being ignored.
-const OPTIONS = new Set(["listen", "path", "token-file", "claude", "spawn-cwd", "tmp-dir", "agent-sdk-version", "keep-days", "max-runs", "keepalive-seconds"]);
+const OPTIONS = new Set(["listen", "path", "token-file", "claude", "spawn-cwd", "tmp-dir", "agent-sdk-version", "keep-days", "max-runs", "keepalive-seconds", "accounts-file"]);
 const options = new Map();
 for (let i = 2; i < process.argv.length; i++) {
 	const arg = process.argv[i];
@@ -246,16 +249,23 @@ if (!TESTED_CLAUDE_VERSIONS.includes(CLAUDE_VERSION)) {
 	log(`warning: Claude Code ${CLAUDE_VERSION} is untested (tested: ${TESTED_CLAUDE_VERSIONS.join(", ")}); if it shows the model this machine's environment, the bridge warns about a leak`);
 }
 
-const PROJECT_DIR = join(CLAUDE_DIR, "projects", projectDirName(SPAWN_CWD_REAL));
+let POOL;
+try { if (flag("accounts-file")) POOL = new AccountPool(flag("accounts-file"), privateDir, log); }
+catch (error) { fatal(`cannot load --accounts-file: ${error.message}`); }
+// Keep the authoritative cache separate from every account's working copy,
+// including when an account uses the daemon's default CLAUDE_CONFIG_DIR.
+const SESSION_DIR = POOL ? privateDir(`${SPAWN_CWD_REAL}.sessions`) : CLAUDE_DIR;
+const PROJECT_DIR = join(SESSION_DIR, "projects", projectDirName(SPAWN_CWD_REAL));
 // Claude Code's temporary files for the spawn directory, one folder per session.
 const PROJECT_TMP = join(CC_TMPDIR, `claude-${UID}`, projectDirName(SPAWN_CWD_REAL));
 // The daemon's notes on the session files it keeps (see "Stored sessions").
-const NOTES_DIR = join(CLAUDE_DIR, "claude-remote", projectDirName(SPAWN_CWD_REAL));
+const NOTES_DIR = join(SESSION_DIR, "claude-remote", projectDirName(SPAWN_CWD_REAL));
+const preferredAccounts = new Map();
 
 const sessionFile = (id) => join(PROJECT_DIR, `${id}.jsonl`);
 function removeSession(id) {
 	rmSync(sessionFile(id), { force: true });
-	for (const dir of [join(PROJECT_DIR, id), join(PROJECT_TMP, id), join(CLAUDE_DIR, "session-env", id)]) rmSync(dir, { recursive: true, force: true });
+	for (const dir of [join(PROJECT_DIR, id), join(PROJECT_TMP, id), join(SESSION_DIR, "session-env", id)]) rmSync(dir, { recursive: true, force: true });
 }
 
 // B's own settings.json, and the CLAUDE.md, rules, skills, agents and commands
@@ -275,8 +285,8 @@ const argsOnB = (args) => args.map((a) => (a.startsWith("--setting-sources=") ? 
 // then sends the image without the line. A prompt image it had to shrink keeps
 // the "original WxH" note; an image in a tool result loses it (pi's read tool
 // shrinks images and adds the same note itself).
-function blockSavedFiles(id) {
-	for (const path of [join(PROJECT_DIR, id, "tool-results"), join(PROJECT_TMP, id, "images")]) {
+function blockSavedFiles(id, projectDir = PROJECT_DIR) {
+	for (const path of [join(projectDir, id, "tool-results"), join(PROJECT_TMP, id, "images")]) {
 		try { if (statSync(path).isFile()) continue; } catch {}
 		rmSync(path, { recursive: true, force: true });
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -378,6 +388,7 @@ function readNote(id) {
 	try { return JSON.parse(readFileSync(notePath(id), "utf8")); } catch { return null; }
 }
 function forget(id) {
+	preferredAccounts.delete(id);
 	rmSync(notePath(id), { force: true });
 	removeSession(id);
 }
@@ -400,7 +411,7 @@ function store(id, base, snapshots, aCwd, bSnap) {
 	const from = base && base.length <= bytes.length && sha256(bytes.subarray(0, base.length)) === base.hash ? base.length : 0;
 	// Someone may have removed the notes while the daemon runs.
 	mkdirSync(NOTES_DIR, { recursive: true, mode: 0o700 });
-	writeFileSync(notePath(id), JSON.stringify({ aHash: sha256(bytes), aLength: bytes.length, bLength: b.length, aCwd, bSnapshot: bSnap, snapshots }), { mode: 0o600 });
+	writeFileSync(notePath(id), JSON.stringify({ aHash: sha256(bytes), aLength: bytes.length, bLength: b.length, aCwd, bSnapshot: bSnap, snapshots, ...(preferredAccounts.has(id) ? { account: preferredAccounts.get(id) } : {}) }), { mode: 0o600 });
 	return { from, bytes: bytes.subarray(from), leaks: leaks.filter((l) => l.offset >= from).map(({ offset, ...l }) => l) };
 }
 
@@ -422,6 +433,16 @@ function sweep(bSnap) {
 			if (busy.has(id) || existsSync(notePath(id))) continue;
 			if (UUID.test(id)) removeSession(id);
 			else rmSync(join(dir, name), { recursive: true, force: true });
+		}
+	}
+	if (POOL) for (const account of POOL.accounts) {
+		const dir = join(account.configDir, "projects", projectDirName(SPAWN_CWD_REAL));
+		if (!existsSync(dir)) continue;
+		for (const name of readdirSync(dir)) {
+			const id = name.replace(/\.jsonl$/, "");
+			if (busy.has(id) || !UUID.test(id)) continue;
+			rmSync(join(dir, name), { recursive: true, force: true });
+			rmSync(join(account.configDir, "session-env", id), { recursive: true, force: true });
 		}
 	}
 }
@@ -899,7 +920,7 @@ function start(hello, bSnap, stored, upload, io) {
 	}
 
 	const args = argsOnB(claudeArgs({ kind, model, thinking, ...session }));
-	const child = spawn(CLAUDE, args, { cwd: SPAWN_CWD_REAL, env: claudeEnv(), stdio: ["pipe", "pipe", "pipe"] });
+	const child = POOL ? pooledProcess({ kind, model, thinking, opened, target, args, stored }) : spawn(CLAUDE, args, { cwd: SPAWN_CWD_REAL, env: claudeEnv(), stdio: ["pipe", "pipe", "pipe"] });
 	// A child that could not start (its binary gone, say) has no pid, and its
 	// error event says why.
 	const started = child.pid !== undefined;
@@ -919,7 +940,7 @@ function start(hello, bSnap, stored, upload, io) {
 		let leaks = [];
 		// Why the run failed on B, for A to report: Claude Code did not start, or
 		// its session file cannot go back (the bridge needs it after every turn).
-		let error = started ? undefined : `could not start Claude Code: ${startError}`;
+		let error = started ? child.poolError : `could not start Claude Code: ${startError}`;
 		try {
 			if (started && kind === "provider") {
 				// A fork leaves its parent as it was; keep it for the next resume.
@@ -945,6 +966,91 @@ function start(hello, bSnap, stored, upload, io) {
 		io.exit({ code, signal, files, leaks, ...(error ? { error } : {}) }, file);
 	});
 	return child;
+}
+
+/** The login's email address, which Claude Code shows the model in the
+ *  session context. */
+function accountEmail(configDir) {
+	try { return JSON.parse(readFileSync(join(configDir, ".claude.json"), "utf8")).oauthAccount?.emailAddress; } catch { return undefined; }
+}
+
+const EMAIL_SENTENCE = /^(The user's email address is )(\S+)(\. )/;
+
+/** Copy a session file for a worker logged in as `email`. Claude Code compares
+ *  the last `session_context` record's values with its own login and, when
+ *  they differ, appends a notice that the context was re-read; after a switch
+ *  in the middle of a turn, that notice is sent inside a tool result. The
+ *  record's `rendered` text, which is what the model is sent, stays as it was.
+ *  Returns the replaced values by record uuid. */
+function copyForAccount(from, to, email) {
+	const replaced = new Map();
+	const lines = readFileSync(from, "utf8").split("\n");
+	if (typeof email === "string" && email) for (let i = 0; i < lines.length; i++) {
+		if (!lines[i].includes('"session_context"')) continue;
+		let r;
+		try { r = JSON.parse(lines[i]); } catch { continue; }
+		const context = r?.type === "attachment" && r.attachment?.type === "session_context" ? r.attachment.context : null;
+		if (typeof context?.userEmail !== "string" || typeof r.uuid !== "string") continue;
+		const value = context.userEmail.replace(EMAIL_SENTENCE, (_, before, _old, after) => `${before}${email}${after}`);
+		if (value === context.userEmail) continue;
+		replaced.set(r.uuid, context.userEmail);
+		context.userEmail = value;
+		lines[i] = JSON.stringify(r);
+	}
+	writeFileSync(to, lines.join("\n"), { mode: 0o600 });
+	return replaced;
+}
+
+function pooledProcess({ kind, model, thinking, opened, target, args, stored }) {
+	const id = target ?? opened;
+	const read = (path) => existsSync(path) ? parseJsonl(readFileSync(path, "utf8")) : [];
+	return new PooledProcess({
+		pool: POOL, model, sessionId: id, persistent: kind === "provider",
+		preferred: stored?.account ?? preferredAccounts.get(id),
+		records: read(sessionFile(opened)), log,
+		onAccount: (account) => preferredAccounts.set(id, account),
+		checkpoint: (records) => {
+			if (records.length) writeFileSync(sessionFile(id), toJsonl(records), { mode: 0o600 });
+		},
+		launch: (account, recovery) => {
+			checkDirs();
+			privateDir(account.configDir);
+			const project = privateDir(join(account.configDir, "projects", projectDirName(SPAWN_CWD_REAL)));
+			const ids = [...new Set([opened, target].filter(Boolean))];
+			const email = accountEmail(account.configDir);
+			// The daemon's copy keeps the values Claude Code first wrote, so A's
+			// copy still only grows.
+			const replaced = new Map();
+			for (const session of ids) {
+				const path = join(project, `${session}.jsonl`);
+				rmSync(path, { force: true });
+				if (existsSync(sessionFile(session))) for (const [uuid, value] of copyForAccount(sessionFile(session), path, email)) replaced.set(uuid, value);
+				blockSavedFiles(session, project);
+			}
+			const restore = (records) => {
+				for (const r of records) if (replaced.has(r.uuid) && r.attachment?.type === "session_context") r.attachment.context.userEmail = replaced.get(r.uuid);
+				return records;
+			};
+			const env = { ...claudeEnv(), CLAUDE_CONFIG_DIR: account.configDir };
+			// A daemon launched from an authenticated shell must still use each
+			// directory's login, rather than one environment credential for all.
+			for (const name of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"]) delete env[name];
+			// A recovering worker resumes the checkpointed session; PooledProcess
+			// sends the prompt that continues the turn.
+			const workerArgs = recovery ? argsOnB(claudeArgs({ kind, model, thinking, resume: id })) : args;
+			return {
+				child: spawn(CLAUDE, workerArgs, { cwd: SPAWN_CWD_REAL, env, stdio: ["pipe", "pipe", "pipe"] }),
+				read: () => restore(read(join(project, `${existsSync(join(project, `${id}.jsonl`)) ? id : opened}.jsonl`))),
+				cleanup: () => {
+					for (const session of ids) {
+						rmSync(join(project, `${session}.jsonl`), { force: true });
+						rmSync(join(project, session), { recursive: true, force: true });
+						rmSync(join(account.configDir, "session-env", session), { recursive: true, force: true });
+					}
+				},
+			};
+		},
+	});
 }
 
 sweep(bSnapshot());

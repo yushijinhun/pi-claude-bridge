@@ -73,6 +73,10 @@ Create `~/.pi/agent/claude-bridge.json`
 - `longContextExtraUsage` - set to `true` to run Opus 4.6 (on Pro) and Sonnet 4.6 with 1M context, billed through Extra Usage.
 - `remote` (experimental) - run Claude Code on another machine, the one with your Claude login, through its `claude-remote-daemon`: `{ "url": "ws://127.0.0.1:7878", "tokenFile": "~/.config/claude-remote-token" }`. Tools, files and session history stay on this machine. It needs the bridge from this repository rather than the npm release; setup is in [remote/README.md](remote/README.md). Claude Code then uses that machine's environment, so `autoMemoryEnabled`, `strictMcpConfig: false`, `pathToClaudeCodeExecutable` and the `env` below are ignored; pi shows a warning for the settings.
 
+### Multiple Claude subscriptions
+
+Run a daemon with `--accounts-file` and connect through `provider.remote`, including when the daemon runs on this machine. Choose `scheduling: "priority"` (the default, higher account priority first) or `"sticky"` (keep a session's account while available). When every account is drained, `exhausted: "error"` returns a rate limit by default; use `"wait"` to wait for a reset. The daemon switches accounts without repeating completed tools and reloads the accounts file automatically. Several local or remote daemons can share the same account directories. See [daemon account setup](remote/README.md#multiple-subscriptions).
+
 ### Model overrides
 
 pi's `modelOverrides` in `~/.pi/agent/models.json` do not work correctly with pi-claude-bridge; they only apply to pi-side settings like compaction threshold. Overriding `contextWindow` or other fields requires editing `src/models.ts` directly. To pin a model to 200K, use `provider.forceTwoHundredK` instead.

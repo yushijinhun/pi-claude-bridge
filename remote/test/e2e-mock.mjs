@@ -56,6 +56,7 @@ const results = [];
 const check = (name, ok, detail = "") => { results.push({ name, ok }); console.log(`${ok ? "PASS" : "FAIL"} ${name}${detail ? ` — ${detail}` : ""}`); };
 
 function waitFor(child, pattern, label) {
+	console.log(`Waiting for ${label} PID ${child.pid} to become ready`);
 	return new Promise((resolve, reject) => {
 		let seen = "";
 		const timer = setTimeout(() => reject(new Error(`${label} did not start: ${seen.slice(-800)}`)), 60000);
@@ -71,7 +72,7 @@ function waitFor(child, pattern, label) {
 // --- B: mock API + daemon in a sandbox that cannot see A's project ---
 // B installs the package: its files and its one dependency.
 mkdirSync(B_INSTALL, { recursive: true });
-for (const f of ["daemon.mjs", "protocol.mjs", "env-block.mjs", "package.json"]) copyFileSync(join(REMOTE_DIR, f), join(B_INSTALL, f));
+for (const f of ["daemon.mjs", "protocol.mjs", "env-block.mjs", "accounts.mjs", "pooled-process.mjs", "package.json"]) copyFileSync(join(REMOTE_DIR, f), join(B_INSTALL, f));
 cpSync(dirname(require.resolve("ws/package.json")), join(B_INSTALL, "node_modules", "ws"), { recursive: true });
 // A binary inside the checkout's node_modules is hidden on B too.
 let claudeOnB = execFileSync("realpath", [CLAUDE_BIN], { encoding: "utf8" }).trim();
@@ -104,6 +105,7 @@ function startDaemon(listen, spawnCwd, tmpDir, extra = []) {
 // Signal a process and wait until it has exited.
 const stopped = (proc, signal) => new Promise((resolve) => {
 	if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+	console.log(`Waiting for PID ${proc.pid} to exit after its stop signal`);
 	proc.once("exit", resolve);
 	try { signal(); } catch { resolve(); }
 });

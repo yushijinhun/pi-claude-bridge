@@ -33,6 +33,8 @@
     "spawner.mjs",
     "protocol.mjs",
     "env-block.mjs",
+    "accounts.mjs",
+    "pooled-process.mjs",
     "README.md",
     "LICENSE"
   ],
