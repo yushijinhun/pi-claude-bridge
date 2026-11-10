@@ -171,6 +171,8 @@ Events are not tied to one response. One that arrives after a turn has ended on 
 
 An extension that reads these headers for the built-in `anthropic` provider can also accept `claude-bridge` without other changes.
 
+When a rejected window fails the request, the error includes `retry-after-ms`: the time until Claude Code's reported reset, plus one second. [pi-limits-wait](https://github.com/gee666/pi-limits-wait) uses it to keep pi's turn waiting until the reset; the retry starts a new Claude Code process from the saved conversation.
+
 ### Using with @gotgenes/pi-subagents
 
 Requires the following in `~/.pi/agent/subagents.json`:

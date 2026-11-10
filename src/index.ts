@@ -31,7 +31,7 @@ import { createToolServer } from "./mcp-server.js";
 import { nonSystemMessages, toBridgeContext } from "./transcript.js";
 import { forgetSessionCwd, rememberSessionCwd, rememberSummarySession, sessionCwdFor, summarySessionFor } from "./session-cwd.js";
 import { updateUsage, type SdkUsage } from "./usage.js";
-import { rateLimitResponse } from "./rate-limit.js";
+import { rateLimitResponse, type RateLimitInfo } from "./rate-limit.js";
 import { BRIDGE_VERSION, packageVersion, setTraceNotifier, traceAssertReady, traceEvent, traceId, traceInput, traceQueryStart, traceSignalId, traceSnapshot, traceStrict } from "./cache-trace.js";
 import { DEBUG, debug, makeCliDebugOptions, moduleInstanceId } from "./debug.js";
 import { CC_CHILD_ENV, ccChildEnv, CLAUDE_MD_EXCLUDES, errorMessage, REASONING_TO_EFFORT, resultErrorText } from "./cc-child.js";
@@ -342,9 +342,16 @@ function extractUserPromptBlocks(messages: Context["messages"]): ContentBlockPar
  *  treats as a tool failure and refuses to retry. "quota exceeded" is on pi-ai's non-retryable
  *  list, which wins over its retryable "rate limit" pattern, so pi hands the rejected window
  *  straight to fallback instead of retrying a limit that resets in hours (issue #183). */
-function describeRateLimitFailure(rejection: { rateLimitType?: string; resetsAt?: number }, failure: string): string {
+function describeRateLimitFailure(rejection: RateLimitInfo, failure: string): string {
 	const kind = rejection.rateLimitType ? ` (${rejection.rateLimitType})` : "";
-	const resets = rejection.resetsAt ? ` — resets ${new Date(rejection.resetsAt * 1000).toLocaleTimeString()}` : ""; // resetsAt: Unix seconds (unit undocumented in the SDK; observed)
+	// retry-after-ms tells wait extensions (pi-limits-wait) to retry one second after the
+	// reset. A missing or past reset gets none, since retrying at once could loop, and so
+	// does a rejection Extra Usage was serving: the failure after it has another cause.
+	const resetMs = (rejection.resetsAt ?? 0) * 1000; // Unix seconds (unit undocumented in the SDK; observed)
+	const remainingMs = resetMs - Date.now();
+	const resets = remainingMs > 0 && !rejection.isUsingOverage
+		? ` — resets ${new Date(resetMs).toLocaleString()} (retry-after-ms: ${remainingMs + 1000})`
+		: "";
 	return `Claude quota exceeded — rate limit${kind}${resets}: ${failure}`;
 }
 

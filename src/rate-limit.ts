@@ -22,6 +22,8 @@ export type RateLimitInfo = {
 	rateLimitType?: string;
 	overageStatus?: string;
 	overageResetsAt?: number;
+	/** Extra Usage is serving requests while the plan window is rejected. */
+	isUsingOverage?: boolean;
 	unifiedWindows?: Record<string, UsageWindow | undefined>;
 };
 

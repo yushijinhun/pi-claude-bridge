@@ -91,6 +91,36 @@ describe("a rate-limited failure", () => {
 		assert.ok(c.turnOutput.errorMessage.includes("five_hour"));
 	});
 
+	// Wait extensions such as pi-limits-wait read retry-after-ms from the message.
+	const now = Date.parse("2026-11-06T23:59:59.250Z");
+	const rejectedUntil = (resetsAt, extra) => ({ ...rejection, rate_limit_info: { ...rejection.rate_limit_info, resetsAt, ...extra } });
+
+	it("says how long until the window resets", async (t) => {
+		t.mock.method(Date, "now", () => now);
+		const c = makeCtx();
+		await consume(c, [rejectedUntil(Date.parse("2026-11-13T23:59:59Z") / 1000), limitResult]);
+
+		assert.ok(c.turnOutput.errorMessage.includes("(retry-after-ms: 604800750)"), "the reset, plus one second");
+		assert.equal(isRetryableAssistantError(c.turnOutput), false, "pi's own short retries stay off");
+	});
+
+	it("gives no delay for a missing or past reset", async (t) => {
+		t.mock.method(Date, "now", () => now);
+		for (const resetsAt of [undefined, now / 1000 - 60]) {
+			const c = makeCtx();
+			await consume(c, [rejectedUntil(resetsAt), limitResult]);
+			assert.match(c.turnOutput.errorMessage, RATE_LIMIT);
+			assert.doesNotMatch(c.turnOutput.errorMessage, /retry-after/);
+		}
+	});
+
+	it("gives no delay to a later failure while Extra Usage serves the rejected window", async (t) => {
+		t.mock.method(Date, "now", () => now);
+		const c = makeCtx();
+		await consume(c, [rejectedUntil(now / 1000 + 3600, { isUsingOverage: true }), errorResult]);
+		assert.doesNotMatch(c.turnOutput.errorMessage, /retry-after/, "a capacity 429 must not wait for the plan reset");
+	});
+
 	it("labels only the failure it caused, not a later one", async () => {
 		const c = makeCtx();
 		await consume(c, [rejection, limitResult]);
