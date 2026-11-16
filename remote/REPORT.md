@@ -264,7 +264,7 @@ B runs the same command line with one change: a normal query gets `--setting-sou
 **Claude Code's stdin, during the run:**
 
 - The `initialize` request:
-  - the system-prompt text pi forwards: AGENTS.md/CLAUDE.md contents with their absolute paths on A, the skills list with skill file paths on A, extension sections;
+  - pi's whole system prompt: its tool list and rules, the paths of pi's documentation on A, AGENTS.md/CLAUDE.md contents with their absolute paths on A, the skills list with skill file paths on A, extension sections, and A's working directory;
   - pi's tool list: names, descriptions and input schemas.
 - Each prompt and each steer, as text and images.
 - Each tool result: the output of pi's tools run on A (file contents, command output, paths). A result cut by the 50,000-character cap names the file on A that keeps the full text.

@@ -512,9 +512,10 @@ const promptBlock = (b) => isObject(b) && (
 	: b.type === "image" && !otherKeys(b, ["type", "source"]).length && isObject(b.source) && b.source.type === "base64"
 		&& !otherKeys(b.source, ["type", "media_type", "data"]).length && typeof b.source.media_type === "string" && typeof b.source.data === "string");
 // The SDK's initialize request, as the bridge fills it: a provider query names
-// pi's tool server and lists its tools and appends to the system prompt; a
-// summary query sets its own system prompt and no skills. The rest of the
-// request (hooks, agents, plugins, ...) is refused.
+// pi's tool server, lists its tools and forwards pi's system prompt (as the
+// preset's append, or whole with provider.systemPromptPreset off); a summary
+// query sets its own system prompt and no skills. The rest of the request
+// (hooks, agents, plugins, ...) is refused.
 const INITIALIZE = {
 	subtype: () => true,
 	sdkMcpServers: strings,
