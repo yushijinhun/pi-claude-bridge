@@ -520,6 +520,34 @@ test("reload from wait to error returns a rate limit for an already waiting quer
  } finally { await f.close(); }
 });
 
+test("unclassified Fable rejections do not exhaust Opus on the same accounts", { timeout: 30000 }, async () => {
+ const f = await fixture(({ res, body }) => {
+  if (!body.model.startsWith("claude-fable-")) return success(res, body);
+  // A credit-gated rejection has no representative subscription window and
+  // tells Claude Code not to retry the same account's request.
+  res.writeHead(429, {
+   "content-type": "application/json", "x-should-retry": "false",
+   "anthropic-ratelimit-unified-status": "rejected",
+   "anthropic-ratelimit-unified-reset": String(Math.floor(Date.now() / 1000) + 86400),
+   "anthropic-ratelimit-unified-overage-status": "rejected",
+   "anthropic-ratelimit-unified-overage-disabled-reason": "org_level_disabled",
+  });
+  res.end(JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Fable requires usage credits" } }));
+ });
+ try {
+  await assert.rejects(f.run("REJECT FABLE", { model: "claude-fable-5-2[1m]" }), /Claude quota exceeded: rate limit \(retry-after-ms=\d+\)/);
+  assert.deepEqual(f.calls.map((c) => c.account), ["first", "second"]);
+  // Another daemon reads the persisted rejections, without any in-memory state.
+  const otherDaemon = await f.daemon();
+  const opus = await f.run("OPUS STILL HAS QUOTA", { model: "claude-opus-5-5[1m]" }, otherDaemon);
+  transparent(f, opus);
+  assert.deepEqual(f.calls.map((c) => c.account), ["first", "second", "first"]);
+  assert.ok(f.calls.at(-1).body.model.startsWith("claude-opus-5-5"));
+  await assert.rejects(f.run("FABLE IS STILL BLOCKED", { model: "claude-fable-5-2[1m]" }, otherDaemon), /Claude quota exceeded: rate limit/);
+  assert.equal(f.calls.length, 3);
+ } finally { await f.close(); }
+});
+
 test("exhaustion defaults to error and reports the earliest reset", { timeout: 30000 }, async () => {
  const f = await fixture(({ res }) => quota(res));
  try {

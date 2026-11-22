@@ -9,6 +9,13 @@ const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const keys = (v, allowed) => Object.keys(v).every((k) => allowed.includes(k));
 const family = (model) => /claude-(opus|sonnet|haiku|fable)-/.exec(model)?.[1];
 
+function limitScope(model, rateLimitType) {
+	if (rateLimitType === "five_hour" || rateLimitType === "seven_day") return "all";
+	// Missing/unknown windows and Extra Usage rejections do not establish that
+	// other models have exhausted their included quota. Keep those exact-model.
+	return /^seven_day_(opus|sonnet|haiku|fable)$/.exec(rateLimitType)?.[1] ?? `model-${model}`;
+}
+
 /** Limits live with the login, so daemons using the same login share cooldowns. */
 export class AccountPool extends EventEmitter {
 	constructor(file, privateDir, log = () => {}) {
@@ -86,11 +93,24 @@ export class AccountPool extends EventEmitter {
 	blockedUntil(account, model, now = Date.now()) {
 		let until = 0;
 		for (const name of readdirSync(account.limitsDir)) {
-			const match = /^(all|opus|sonnet|haiku|fable)-(\d+)\.json$/.exec(name);
+			const match = /^(all|opus|sonnet|haiku|fable|model-.+)-(\d+)\.json$/.exec(name);
 			if (!match) continue;
 			const reset = Number(match[2]);
-			if (reset <= now) { rmSync(join(account.limitsDir, name), { force: true }); continue; }
-			if (match[1] === "all" || match[1] === family(model)) until = Math.max(until, reset);
+			const file = join(account.limitsDir, name);
+			if (reset <= now) { rmSync(file, { force: true }); continue; }
+			let scope = match[1];
+			if (scope === "all") {
+				// Older daemons wrote unknown/overage rejections as account-wide.
+				// Interpret their recorded window so existing files recover too.
+				try {
+					const record = JSON.parse(readFileSync(file, "utf8"));
+					if (typeof record.model === "string" && MODEL.test(record.model)) scope = limitScope(record.model, record.rateLimitType);
+				} catch (error) {
+					if (error.code === "ENOENT") continue; // Another daemon expired it.
+					throw error;
+				}
+			}
+			if (scope === "all" || scope === family(model) || scope === `model-${model}`) until = Math.max(until, reset);
 		}
 		return until;
 	}
@@ -110,7 +130,7 @@ export class AccountPool extends EventEmitter {
 
 	reject(account, model, info = {}) {
 		this.reload();
-		const scope = /seven_day_(opus|sonnet|haiku|fable)$/.exec(info.rateLimitType)?.[1] ?? "all";
+		const scope = limitScope(model, info.rateLimitType);
 		const now = Date.now();
 		const reported = Number(info.resetsAt ?? info.overageResetsAt) * 1000;
 		const until = Math.ceil(Number.isFinite(reported) && reported > now ? reported + 1000 : now + this.fallbackMs);
